@@ -710,25 +710,33 @@ window.jobStatus=(()=>{
 <!-- ==================== 배경 제거 스크립트 (BiRefNet, transformers.js) ==================== -->
 <!-- 동적 텍스트 수정 구간: 배경 제거 처리 상태와 오류 메시지 -->
 <!--
-  BiRefNet(ZhengPeng7/BiRefNet_lite, MIT License)을 Hugging Face transformers.js로
+  BiRefNet(ZhengPeng7/BiRefNet_512x512, MIT License)을 Hugging Face transformers.js로
   브라우저에서 직접 실행합니다. 서버 전송 없이 전부 클라이언트(WASM)에서 처리되며,
   모델 파일은 최초 1회만 내려받아 브라우저 캐시에 저장됩니다.
-  WebGPU 백엔드는 현재 이 모델에서 메모리 관련 크래시가 보고되어(onnxruntime#21968)
-  안정성을 위해 의도적으로 WASM(CPU) 백엔드로 고정했습니다.
+  - WebGPU 백엔드는 이 모델에서 메모리 관련 크래시가 보고되어(onnxruntime#21968)
+    안정성을 위해 의도적으로 WASM(CPU) 백엔드로 고정했습니다.
+  - 1024x1024 처리용 BiRefNet_lite는 실사용 중 브라우저 메모리 부족(std::bad_alloc)으로
+    실패하는 사례가 있어, 같은 계열 중 처리 해상도가 512x512로 더 작은 BiRefNet_512x512
+    변형으로 교체했습니다. 연산량/메모리가 대략 1/4 수준이라 훨씬 안정적입니다.
 -->
 <script>
 let birefnetModule;
 async function loadBiRefNet(onProgress){
   const {AutoModel,AutoProcessor,RawImage,env}=await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.2.0');
   env.backends.onnx.wasm.proxy=false;
-  const modelId='onnx-community/BiRefNet_lite';
+  const modelId='onnx-community/BiRefNet_512x512-ONNX';
   const progress_callback=info=>{
     if(info&&info.status==='progress'&&onProgress)onProgress(info);
   };
-  const [model,processor]=await Promise.all([
-    AutoModel.from_pretrained(modelId,{dtype:'fp16',device:'wasm',progress_callback}),
-    AutoProcessor.from_pretrained(modelId,{progress_callback})
-  ]);
+  // fp16을 우선 시도하고, 해당 정밀도 파일이 없거나 로드에 실패하면 fp32로 자동 재시도합니다.
+  let model;
+  try{
+    model=await AutoModel.from_pretrained(modelId,{dtype:'fp16',device:'wasm',progress_callback});
+  }catch(error){
+    console.warn('fp16 모델 로드 실패, fp32로 재시도합니다.',error);
+    model=await AutoModel.from_pretrained(modelId,{dtype:'fp32',device:'wasm',progress_callback});
+  }
+  const processor=await AutoProcessor.from_pretrained(modelId,{progress_callback});
   return {model,processor,RawImage};
 }
 
@@ -779,7 +787,11 @@ window.__removeBg=async function(source){
     maskData=(await RawImage.fromTensor(out.mul(255).to('uint8')).resize(image.width,image.height)).data;
   }catch(error){
     console.error('Background removal failed',error);
-    throw new Error('배경 제거를 완료하지 못했습니다. 다시 시도해 주세요.\n상세: '+(error.message||String(error)));
+    const msg=String(error&&error.message||error);
+    if(/bad_alloc|out of memory|OrtRun|memory access out of bounds/i.test(msg)){
+      throw new Error('배경 제거 모델이 메모리 부족으로 중단됐습니다. 다른 탭을 닫거나 브라우저를 새로고침한 뒤 다시 시도해 주세요. 그래도 안 되면 이미지 크기를 줄여서 시도해 보세요.');
+    }
+    throw new Error('배경 제거를 완료하지 못했습니다. 다시 시도해 주세요.\n상세: '+msg);
   }
 
   // Draw the ORIGINAL image via the browser's own decoder (not RawImage.toCanvas())
@@ -857,6 +869,39 @@ function removeProductBackground(pixels,width,height,options={}){
   for(let x=0;x<width;x++){classify(x);classify((height-1)*width+x);}
   for(let y=0;y<height;y++){classify(y*width);classify(y*width+width-1);}
   while(head<tail){const p=queue[head++],x=p%width;if(x>0)classify(p-1,p);if(x<width-1)classify(p+1,p);if(p>=width)classify(p-width,p);if(p<n-width)classify(p+width,p);}
+  // Sanity check: a correct border-connected fill should only eat a thin
+  // margin around the product's own silhouette, not carve big holes out of
+  // the product itself. We can't assume the product fills the whole frame
+  // (there's often deliberate white space around it, or a narrow shape like
+  // a cone), so instead of checking a fixed central box we first find the
+  // bounding box of whatever pixels SURVIVED (state!==2), then look for
+  // removed pixels well inside that box (shrunk 12% on each side). Real
+  // shape cutouts (rounded corners, a cone's triangular sides, etc.) mostly
+  // remove pixels near the edges of that box, not deep inside it. A large
+  // fraction removed deep inside means the fill most likely leaked into a
+  // product surface that happens to share the backdrop's color *and* soft
+  // lighting gradient (e.g. a white lid photographed on a white background)
+  // -- a case pure color-distance logic cannot resolve, since there is no
+  // real edge for it to detect. Bail out here so the caller can fall back
+  // to the AI model instead of silently returning a damaged cutout.
+  {
+    let minX=width,maxX=-1,minY=height,maxY=-1;
+    for(let y=0;y<height;y++)for(let x=0;x<width;x++){
+      if(state[y*width+x]!==2){if(x<minX)minX=x;if(x>maxX)maxX=x;if(y<minY)minY=y;if(y>maxY)maxY=y;}
+    }
+    if(maxX>=minX&&maxY>=minY){
+      const bw=maxX-minX+1,bh=maxY-minY+1;
+      const ix0=minX+Math.floor(bw*0.12),ix1=maxX-Math.floor(bw*0.12);
+      const iy0=minY+Math.floor(bh*0.12),iy1=maxY-Math.floor(bh*0.12);
+      let innerRemoved=0,innerTotal=0;
+      for(let y=iy0;y<=iy1;y++)for(let x=ix0;x<=ix1;x++){
+        innerTotal++;if(state[y*width+x]===2)innerRemoved++;
+      }
+      if(innerTotal>0&&innerRemoved/innerTotal>0.05){
+        throw new Error('제품 안쪽까지 배경으로 잘못 인식된 것 같아요. AI 배경 제거로 전환할게요.');
+      }
+    }
+  }
   const output=new Uint8ClampedArray(pixels);let removed=0,remaining=0;
   for(let p=0;p<n;p++){
     const i=p*4;
@@ -1599,13 +1644,28 @@ $('fbRemoveBg').onclick=async()=>{
   const button=$('fbRemoveBg');button.disabled=true;window.jobStatus.start('배경 제거 중…');
   try{
     const source=await backgroundSource(target,isGift);
-    // Always use the AI model. The fast solid-color path was removed:
-    // color-distance flood fill cannot reliably separate a white/cream
-    // product from a white background, and it doesn't generalize well to
-    // cast shadows either. The AI model uses learned shape cues instead of
-    // raw color distance, so it handles both cases far more reliably.
-    const resultSrc=await window.__removeBg(source);
-    const alreadyTransparent=false;
+    // 1) Try the deterministic, border-connected flood fill first. It is fast,
+    // free, and — importantly — it only removes background pixels that are
+    // actually connected to the image border, so bright/white areas that are
+    // part of the package artwork (logos, text boxes, highlights) are never
+    // touched even if their color is close to the white backdrop. This is
+    // exactly the common case for product packaging shot on white/solid
+    // background, and it's more reliable there than the AI model, which
+    // reasons about "object vs background" semantically and can mistake a
+    // light-colored graphic near the edge for background.
+    // 2) Only if the background isn't a clean uniform color (busy/gradient/
+    // photographic backdrops) do we fall back to the AI model (BiRefNet),
+    // which handles those general cases far better than color-distance ever
+    // could.
+    let resultSrc,alreadyTransparent=false;
+    try{
+      const detResult=await window.__editProductBackground(source);
+      resultSrc=detResult.src;alreadyTransparent=detResult.alreadyTransparent;
+    }catch(detError){
+      console.warn('단색 배경 감지 실패, AI 배경 제거로 전환합니다.',detError);
+      window.jobStatus.update('무늬가 있는 배경으로 판단, AI 배경 제거 중…');
+      resultSrc=await window.__removeBg(source);
+    }
     const image=await new Promise((resolve,reject)=>{const im=new Image();im.onload=()=>resolve(im);im.onerror=()=>reject(new Error('결과 이미지를 읽지 못했습니다.'));im.src=resultSrc;});
     if(isGift?gift!==target:!layers.includes(target))return;
     commitBackgroundResult(target,source,resultSrc,image.naturalWidth,image.naturalHeight,isGift);

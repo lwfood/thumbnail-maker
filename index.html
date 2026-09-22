@@ -89,6 +89,15 @@ body{font-family:Pretendard,-apple-system,BlinkMacSystemFont,"Apple SD Gothic Ne
 .bpop-cell{background:var(--chip);border-radius:6px;height:32px;width:44px;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:600;cursor:pointer;border:none;}
 .bpop-cell.active{background:var(--accent);color:#fff;}
 .bpop-cell:hover{background:#e0e0e0;}
+.bpop-custom{grid-column:1/-1;display:flex;gap:6px;margin-top:2px;}
+.bpop-custom input{flex:1;min-width:0;height:32px;border:1px solid var(--border);border-radius:6px;padding:0 8px;font:inherit;font-size:13px;}
+.bpop-custom button{height:32px;padding:0 10px;border:none;border-radius:6px;background:var(--accent);color:#fff;font-size:13px;font-weight:600;cursor:pointer;}
+.badge-custom-row{display:flex;gap:8px;margin:8px 0 12px;}
+.badge-custom-row input{flex:1;min-width:0;height:42px;border:1px solid var(--border);border-radius:8px;padding:0 10px;font:inherit;font-size:14px;}
+.badge-custom-row button{height:42px;padding:0 16px;white-space:nowrap;}
+#rightPanel .badge-custom-row{margin:0;}
+#rightPanel .badge-custom-row input{height:36px;border-radius:4px;font-size:13px;}
+#rightPanel .badge-custom-row button{height:36px;font-size:13px;padding:0 12px;}
 #giftBoxEl{position:absolute;z-index:490;}
 .gift-frame{width:100%;height:100%;position:relative;overflow:hidden;box-sizing:border-box;border:6px solid #FF3F40;border-radius:28px;background:#fff;}
 .gift-frame.selected{outline:4px solid var(--accent);outline-offset:2px;}
@@ -594,9 +603,17 @@ button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid 
         <p class="hint figma-hidden" id="badgeHint">하나만 선택 · 배지 더블클릭으로 수량 교체</p>
         <div id="singleBadgeControls">
           <select id="singleBadgeSelect" aria-label="단품 배지 수량"><option value="">배지를 선택하세요</option></select>
+          <div class="badge-custom-row">
+            <input type="number" id="singleBadgeCustomInput" placeholder="원하는 수량 직접 입력" aria-label="단품 배지 수량 직접 입력" min="1" max="9999" inputmode="numeric"/>
+            <button class="btn accent" id="singleBadgeCustomApply" type="button">적용</button>
+          </div>
         </div>
         <div id="setBadgeControls" hidden>
           <select id="setBadgeSelect" aria-label="추가할 세트 배지"><option value="">배지를 선택하세요</option></select>
+          <div class="badge-custom-row">
+            <input type="number" id="setBadgeCustomInput" placeholder="원하는 수량 직접 입력" aria-label="세트 배지 수량 직접 입력" min="1" max="9999" inputmode="numeric"/>
+            <button class="btn accent" id="setBadgeCustomApply" type="button">추가</button>
+          </div>
           <!-- 현재 선택된 세트 배지 목록 -->
           <section id="selectedSetBadges" aria-labelledby="selectedSetBadgesTitle">
             <h3 id="selectedSetBadgesTitle">선택된 배지</h3>
@@ -1444,8 +1461,9 @@ function rQty(){
   $('setBadgeSelect').dispatchEvent(new Event('figma-sync'));
   if(badgeMode==='set')renderSetBadgeRows();
 }
+function isValidQty(qty){return Number.isInteger(qty)&&qty>=1&&qty<=9999;}
 function chooseSingleBadge(qty){
-  if(badgeMode!=='single'||!PRESETS.includes(qty))return;
+  if(badgeMode!=='single'||!isValidQty(qty))return;
   badgeVis=true;
   const previous=badges[0];
   badges=[previous?{...previous,qty}:{id:nbid++,qty,x:SP.x,y:SP.y,sz:SP.sz,baseSz:SP.sz}];
@@ -1455,7 +1473,7 @@ function syncSet(){
   $('badgeHint').textContent=badgeMode==='set'?'배지 선택 후 +/−로 개수 조절 · 화면에서 더블클릭 교체':'하나만 선택 · 화면의 배지를 더블클릭하면 교체';
 }
 function addSetBadge(qty){
-  if(!PRESETS.includes(qty))return;
+  if(!isValidQty(qty))return;
   badgeVis=true;
   const same=badges.filter(b=>b.qty===qty),last=same[same.length-1];
   const idx=badges.length,sz=last?.sz||SB.sz;
@@ -1534,6 +1552,20 @@ initFigmaDropdown('setBadgeSelect');
 document.addEventListener('pointerdown',event=>{if(!event.target.closest('.figma-select'))document.querySelectorAll('.figma-select.open').forEach(node=>{node.classList.remove('open');node.querySelector('.figma-select-trigger')?.setAttribute('aria-expanded','false');});});
 $('singleBadgeSelect').onchange=event=>chooseSingleBadge(Number(event.target.value));
 $('setBadgeSelect').onchange=event=>{const qty=Number(event.target.value);event.target.value='';if(badgeMode==='set')addSetBadge(qty);};
+function applyCustomSingleBadge(){
+  const input=$('singleBadgeCustomInput');const qty=parseInt(input.value,10);
+  if(!isValidQty(qty))return;
+  chooseSingleBadge(qty);input.value='';
+}
+$('singleBadgeCustomApply').onclick=applyCustomSingleBadge;
+$('singleBadgeCustomInput').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();applyCustomSingleBadge();e.target.blur();}});
+function applyCustomSetBadge(){
+  const input=$('setBadgeCustomInput');const qty=parseInt(input.value,10);
+  if(!isValidQty(qty))return;
+  addSetBadge(qty);input.value='';
+}
+$('setBadgeCustomApply').onclick=applyCustomSetBadge;
+$('setBadgeCustomInput').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();applyCustomSetBadge();e.target.blur();}});
 
 // Badge popover
 function showBadgePop(b,el){
@@ -1545,6 +1577,14 @@ function showBadgePop(b,el){
     cell.onclick=()=>{b.qty=n;pop.classList.remove('open');render();rQty();ph();};
     pop.appendChild(cell);
   });
+  const customRow=document.createElement('div');customRow.className='bpop-custom';
+  const customInput=document.createElement('input');customInput.type='number';customInput.min='1';customInput.max='9999';customInput.inputMode='numeric';customInput.placeholder='직접 입력';customInput.setAttribute('aria-label','배지 수량 직접 입력');
+  const customApply=document.createElement('button');customApply.type='button';customApply.textContent='적용';
+  const applyCustom=()=>{const qty=parseInt(customInput.value,10);if(!isValidQty(qty))return;b.qty=qty;pop.classList.remove('open');render();rQty();ph();};
+  customApply.onclick=applyCustom;
+  customInput.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();applyCustom();}});
+  customInput.addEventListener('pointerdown',e=>e.stopPropagation());
+  customRow.append(customInput,customApply);pop.appendChild(customRow);
   if(!el)return;pop.classList.add('open');
   const rect=el.getBoundingClientRect();
   const canRect=cf.getBoundingClientRect();
